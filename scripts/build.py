@@ -1,42 +1,56 @@
+#!/usr/bin/env python3
 from pathlib import Path
 import pandas as pd
 import itables
 from string import Template
 
-# --- Settings you can customize ---------------------------------------------
-# Columns that should be truncated by default (2-line clamp),
-# expand in place on hover, and show a full-value tooltip.
-COLUMNS_TO_TRUNCATE = ["name", "department"]
+# --- config ----------------------------------------------------
+CSV_PATH = Path("database.csv")
+OUT_DIR = Path("site")
+OUT_FILE = OUT_DIR / "index.html"
 
-# Number of visible lines before clamping
+# Clamp body cells for these column indexes (0-based); [] to disable
+CLAMP_COLUMNS = [2]
 CLAMP_LINES = 2
-# -----------------------------------------------------------------------------
 
-# Read the CSV
-df = pd.read_csv("data/table.csv")
+# Optional: set predictable widths for body cells (by index)
+COLUMN_WIDTHS = {2: "28ch"}
 
-# Find column indices for DataTables "targets"
-targets = [df.columns.get_loc(c) for c in COLUMNS_TO_TRUNCATE if c in df.columns]
+# Keep these header labels on one line and ensure a minimum width (by *name*)
+COLUMN_MIN_WIDTHS_BY_NAME = {
+    "Location": "9ch",
+    "Salary":   "8ch",
+}
+# ---------------------------------------------------------------
 
-# Build interactive DataTable HTML
+df = pd.read_csv(CSV_PATH)
+
+# Build DataTables columnDefs for body cells (widths + clamp class)
+columnDefs = []
+for idx, w in COLUMN_WIDTHS.items():
+    columnDefs.append({"targets": idx, "width": w})
+for idx in CLAMP_COLUMNS:
+    columnDefs.append({"targets": idx, "className": "clamp-2"})
+
+# Generate table HTML (no 'responsive', to avoid warnings)
 html_snippet = itables.to_html_datatable(
     df,
-    connected=True,                 # Load required JS/CSS from CDNs (works on GitHub Pages)
-    classes="display",              # Allow wrapping (Option B baseline)
+    connected=True,
+    classes="display",                 # <- no 'nowrap'
     display_logo_when_loading=False,
-    layout={                        # DataTables v2 layout
-        "topStart": "pageLength",
-        "topEnd": {"search": {"placeholder": "Search table..."}},
-        "bottomStart": "info",
-        "bottomEnd": "paging",
-    },
-    pageLength=25,
-    lengthMenu=[10, 25, 50, 100, 250, 500],
-    search={"caseInsensitive": True},
-    columnDefs=[
-        {"targets": targets, "className": "clip-2"}  # mark cells to clamp
-    ] if targets else None,
+    autoWidth=False,                   # let CSS/layout control widths
+    columnDefs=columnDefs,
 )
+
+# Dynamic CSS rules to set min-width for columns by *name*
+min_width_rules = []
+for name, width in COLUMN_MIN_WIDTHS_BY_NAME.items():
+    if name in df.columns:
+        nth = df.columns.get_loc(name) + 1  # nth-child is 1-based
+        min_width_rules.append(
+            f"table.dataTable th:nth-child({nth}), table.dataTable td:nth-child({nth}) {{ min-width: {width}; }}"
+        )
+column_min_width_css = "\n    ".join(min_width_rules) or "/* (no named min-width rules) */"
 
 template = Template("""<!doctype html>
 <html lang="en">
@@ -46,88 +60,121 @@ template = Template("""<!doctype html>
   <title>Interactive Table</title>
   <meta name="description" content="CSV rendered as an interactive DataTable with itables">
   <style>
-    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
-           padding: 2rem; max-width: 1100px; margin: auto; }
+    body {
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+      padding: 2rem; max-width: 1100px; margin: auto;
+    }
     h1 { font-weight: 600; }
     .note { color: #444; font-size: 0.95rem; margin-bottom: 1rem; }
 
-    /* Option B baseline: wrap long content inside table cells */
-    table.dataTable td, table.dataTable th {
-      white-space: normal;        /* allow wrapping */
-      overflow-wrap: anywhere;    /* break long tokens */
-      word-break: break-word;     /* fallback */
+    .table-wrap { width: 100%; overflow-x: auto; }
+
+    /* Fixed layout = predictable widths; body cells may wrap */
+    table.dataTable { table-layout: fixed; width: 100% !important; }
+
+    /* BODY CELLS: allow wrapping and breaking long tokens */
+    table.dataTable td {
+      white-space: normal !important;
+      word-break: break-word;
     }
 
-    /* Clamp for selected cells; the inner .clip element is what gets clamped */
-    td.clip-2 .clip {
-      display: -webkit-box;
-      -webkit-line-clamp: ${clamp_lines};
-      -webkit-box-orient: vertical;
+    /* HEADERS: keep labels on a single line */
+    table.dataTable thead th {
+      white-space: nowrap !important;
       overflow: hidden;
+      text-overflow: ellipsis;
     }
 
-    /* Hover: expand in place (remove clamp) */
-    td.clip-2:hover .clip {
-      -webkit-line-clamp: unset;
-      max-height: none;
+    /* Column-specific minimum widths (by nth-child) */
+    ${column_min_width_css}
+
+    /* Optional: multi-line clamp for selected body columns */
+    td.clamp-2 {
+      display: -webkit-box;
+      -webkit-box-orient: vertical;
+      -webkit-line-clamp: ${clamp_lines};
+      overflow: hidden;               /* hide beyond the clamp */
+      line-height: 1.25;
+      max-height: calc(1.25em * ${clamp_lines});
+      position: relative;             /* anchor for hover preview */
+      cursor: help;                   /* hint that more text exists */
+    }
+
+    /* Hover preview bubble (doesn't reflow table) */
+    td.clamp-2:hover { overflow: visible; }
+    td.clamp-2:hover::after {
+      content: attr(data-full);       /* set dynamically from cell text */
+      position: absolute;
+      left: 0; top: 100%;
+      z-index: 9999;
+      white-space: normal;
+      max-width: min(48ch, 60vw);
+      margin-top: .25rem;
+      padding: .5rem .6rem;
+      background: rgba(0,0,0,.92);
+      color: #fff;
+      border-radius: .5rem;
+      box-shadow: 0 8px 28px rgba(0,0,0,.25);
+      pointer-events: none;           /* don't steal mouse events */
+    }
+
+    /* If the bubble would overflow viewport on the right, allow wrapping */
+    @media (max-width: 640px) {
+      td.clamp-2:hover::after { max-width: 80vw; }
     }
   </style>
 </head>
 <body>
-  <h1>Interactive CSV Table</h1>
-  <p class="note">
-    Cells in <code>${truncate_cols}</code> are truncated to ${clamp_lines} line(s) by default.
-    Hover to expand. A native tooltip shows the full value.
-  </p>
-  $table
+  <h1>BNL Sample Catalog</h1>
+  <p class="note">Edit the database <a href="https://github.com/mpmdean/BNL_xray_sample_catalog/blob/main/database.csv">here</a>.</p>
+  <div class="table-wrap">
+    $table
+  </div>
 
   <script>
-  // Wrap target cells with a <div class="clip"> and set a native tooltip (title).
-  (function(){
-    function wrapCells(scope){
-      var root = (scope instanceof Element ? scope : document);
-      var tds = root.querySelectorAll('td.clip-2:not([data-wrapped])');
-      for (var i=0; i<tds.length; i++){
-        var td = tds[i];
-        td.setAttribute('data-wrapped', '1');
-        var txt = (td.textContent || '').trim();
-        td.title = txt; // native tooltip
-        var div = document.createElement('div');
-        div.className = 'clip';
-        div.textContent = txt; // safe text insertion
-        td.textContent = '';
-        td.appendChild(div);
-      }
-    }
-
-    // Initial pass
-    wrapCells(document);
-
-    // Re-run when DataTables redraws/paginates/sorts (DOM changes)
-    var mo = new MutationObserver(function(muts){
-      for (var j=0; j<muts.length; j++){
-        var m = muts[j];
-        if (m.addedNodes) {
-          for (var k=0; k<m.addedNodes.length; k++){
-            var node = m.addedNodes[k];
-            if (node && node.nodeType === 1) wrapCells(node);
+    // Attach full text to clamped cells as both title=... (native tooltip)
+    // and data-full (for the custom hover bubble). Re-apply on each draw.
+    (function() {
+      function annotateClampedCells(scope) {
+        (scope.querySelectorAll ? scope : document).querySelectorAll('td.clamp-2').forEach(function(td) {
+          var txt = (td.textContent || '').trim();
+          if (txt) {
+            if (!td.getAttribute('title')) td.setAttribute('title', txt);    // native tooltip
+            td.setAttribute('data-full', txt);                                // custom bubble
           }
-        }
+        });
       }
-    });
-    mo.observe(document.body, {subtree:true, childList:true});
-  })();
+
+      function hookTables() {
+        document.querySelectorAll('table.dataTable').forEach(function(tbl) {
+          // initial pass
+          annotateClampedCells(tbl);
+          // on redraw (paging, sorting, search)
+          if (window.jQuery && jQuery.fn && jQuery.fn.dataTable) {
+            jQuery(tbl).on('draw.dt', function() { annotateClampedCells(tbl); });
+          } else {
+            // Fallback: periodic refresh if DataTables/jQuery not exposed
+            setInterval(function(){ annotateClampedCells(tbl); }, 500);
+          }
+        });
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', hookTables);
+      } else {
+        hookTables();
+      }
+    })();
   </script>
 </body>
 </html>""")
 
 page = template.substitute(
     table=html_snippet,
-    truncate_cols=", ".join(COLUMNS_TO_TRUNCATE) if COLUMNS_TO_TRUNCATE else "(none)",
-    clamp_lines=str(CLAMP_LINES),
+    clamp_lines=CLAMP_LINES,
+    column_min_width_css=column_min_width_css,
 )
 
-out_dir = Path("site")
-out_dir.mkdir(parents=True, exist_ok=True)
-(out_dir / "index.html").write_text(page, encoding="utf-8")
-print("Wrote site/index.html")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+OUT_FILE.write_text(page, encoding="utf-8")
+print(f"Wrote {OUT_FILE}")
